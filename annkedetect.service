@@ -1,0 +1,23 @@
+[Unit]
+Description=annkedetect - flag people, animals and vehicles in archived camera clips
+Documentation=file:/opt/annkedetect/README.md
+Requires=annkedetect-storage.service
+After=annkedetect-storage.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/annkedetect /etc/default/annkedetect
+Restart=on-failure
+RestartSec=60s
+# CPU-heavy: it gets only what nothing else wants
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+MemoryMax=1500M
+PrivateTmp=yes
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
