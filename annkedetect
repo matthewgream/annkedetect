@@ -56,18 +56,18 @@ try {
 const num = (k, d) => (cfg[k] !== undefined && cfg[k] !== '' && !isNaN(Number(cfg[k])) ? Number(cfg[k]) : d);
 
 const GROUPS = ['people', 'animals', 'vehicles'];
-const CAMERAS = Object.entries(cfg)                 // camera-<name>=<groups to flag>, tiles-<name>=<n>
+const CAMERAS = Object.entries(cfg) // camera-<name>=<groups to flag>, tiles-<name>=<n>
     .filter(([k, v]) => k.startsWith('camera-') && v)
     .map(([k, v]) => {
         const name = k.slice('camera-'.length);
         return { name, groups: v.split(',').map((g) => g.trim()), tiles: Math.max(1, Math.round(num(`tiles-${name}`, 1))), masks: null, maskStamp: '' };
     });
 const ARCHIVE = cfg['archive'] || '/opt/storage/camera';
-const MASKS = cfg['masks'] || '';                   // directory of <camera>-mask*.png; empty: no masks
+const MASKS = cfg['masks'] || ''; // directory of <camera>-mask*.png; empty: no masks
 const MODEL = cfg['model'] || path.join(__dirname, 'models', 'yolox_s.onnx');
-const THRESHOLD = num('threshold', 0.4);            // score a detection needs to count
-const DAYS = num('days', 0);                        // only clips from the last <n> days; 0: the whole archive
-const RESCAN = num('rescan', 3600);                // seconds between looks for new clips (annkepull brings them once a day)
+const THRESHOLD = num('threshold', 0.4); // score a detection needs to count
+const DAYS = num('days', 0); // only clips from the last <n> days; 0: the whole archive
+const RESCAN = num('rescan', 3600); // seconds between looks for new clips (annkepull brings them once a day)
 const THREADS = num('threads', 2);
 
 for (const cam of CAMERAS)
@@ -83,14 +83,23 @@ if (!CAMERAS.length && !TEST_CLIPS) {
 
 const VERSION = 1;
 const MODEL_NAME = 'yolox-s (coco, 2022nov)';
-const SIZE = 640;                                   // the model's input, square
-const OVERLAP = 64;                                 // between tiles, so a thing on a seam is whole in one of them
+const SIZE = 640; // the model's input, square
+const OVERLAP = 64; // between tiles, so a thing on a seam is whole in one of them
 const STEP = SIZE - OVERLAP;
 // COCO ids worth a flag outdoors: [id, class, group]
 const CLASSES = [
     [0, 'person', 'people'],
-    [1, 'bicycle', 'vehicles'], [2, 'car', 'vehicles'], [3, 'motorcycle', 'vehicles'], [5, 'bus', 'vehicles'], [7, 'truck', 'vehicles'],
-    [14, 'bird', 'animals'], [15, 'cat', 'animals'], [16, 'dog', 'animals'], [17, 'horse', 'animals'], [18, 'sheep', 'animals'], [19, 'cow', 'animals'],
+    [1, 'bicycle', 'vehicles'],
+    [2, 'car', 'vehicles'],
+    [3, 'motorcycle', 'vehicles'],
+    [5, 'bus', 'vehicles'],
+    [7, 'truck', 'vehicles'],
+    [14, 'bird', 'animals'],
+    [15, 'cat', 'animals'],
+    [16, 'dog', 'animals'],
+    [17, 'horse', 'animals'],
+    [18, 'sheep', 'animals'],
+    [19, 'cow', 'animals'],
 ];
 const COLOURS = { people: 'red', animals: 'yellow', vehicles: 'cyan' };
 const RE_DAY = /^\d{8}$/;
@@ -98,7 +107,7 @@ const RE_CLIP = /^recording_(\d{14})(?:_\d+)?\.mp4$/;
 
 // ------------------------------------------------------------------------------------------ util
 
-const log = (...a) => console.log(...a);            // journald stamps it
+const log = (...a) => console.log(...a); // journald stamps it
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const even = (n) => Math.max(2, Math.round(n / 2) * 2);
 const pad = (n) => String(n).padStart(2, '0');
@@ -108,7 +117,8 @@ const round = (n, places) => Math.round(n * 10 ** places) / 10 ** places;
 function run(cmd, argv, binary = false) {
     return new Promise((resolve, reject) => {
         const child = spawn(cmd, argv, { timeout: 600000 });
-        const out = [], err = [];
+        const out = [],
+            err = [];
         child.stdout.on('data', (d) => out.push(d));
         child.stderr.on('data', (d) => err.push(d));
         child.on('error', reject);
@@ -126,7 +136,7 @@ function writeAtomic(file, data) {
 
 // ------------------------------------------------------------------------------------------ masks
 
-const MASK_WIDTH = 960;                             // plenty for looking up a point
+const MASK_WIDTH = 960; // plenty for looking up a point
 
 // {group: {w, h, bits}} from the camera's mask files, or null when it has none; re-read when one changes
 async function masksFor(cam) {
@@ -141,11 +151,16 @@ async function masksFor(cam) {
     if (stamp === cam.maskStamp) return cam.masks;
     const masks = {};
     for (const n of names) {
-        const file = path.join(MASKS, n), tail = n.slice(`${cam.name}-mask`.length, -'.png'.length).replace(/^-/, '');
+        const file = path.join(MASKS, n),
+            tail = n.slice(`${cam.name}-mask`.length, -'.png'.length).replace(/^-/, '');
         const groups = tail ? tail.split('-and-').map((g) => (g === 'cars' ? 'vehicles' : g)) : GROUPS;
         const [w, h] = (await run('ffprobe', ['-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file])).trim().split(',').map(Number);
         const mh = Math.round((h * MASK_WIDTH) / w);
-        const bits = await run('ffmpeg', ['-v', 'error', '-i', file, '-vf', `scale=${MASK_WIDTH}:${mh}:flags=neighbor`, '-f', 'rawvideo', '-pix_fmt', 'gray', '-'], true);
+        const bits = await run(
+            'ffmpeg',
+            ['-v', 'error', '-i', file, '-vf', `scale=${MASK_WIDTH}:${mh}:flags=neighbor`, '-f', 'rawvideo', '-pix_fmt', 'gray', '-'],
+            true
+        );
         for (const g of groups)
             if (GROUPS.includes(g)) masks[g] = { w: MASK_WIDTH, h: mh, bits };
             else log(`${cam.name}: ${n}: unknown group "${g}", ignored`);
@@ -165,8 +180,8 @@ function masksBounds(masks, groups) {
         for (let y = 0; y < m.h; y++)
             for (let x = 0; x < m.w; x++)
                 if (m.bits[y * m.w + x] > 127) {
-                    b.x0 = Math.min(b.x0, x / m.w), b.x1 = Math.max(b.x1, (x + 1) / m.w);
-                    b.y0 = Math.min(b.y0, y / m.h), b.y1 = Math.max(b.y1, (y + 1) / m.h);
+                    ((b.x0 = Math.min(b.x0, x / m.w)), (b.x1 = Math.max(b.x1, (x + 1) / m.w)));
+                    ((b.y0 = Math.min(b.y0, y / m.h)), (b.y1 = Math.max(b.y1, (y + 1) / m.h)));
                 }
     }
     return masks && b.x1 > b.x0 ? b : { x0: 0, y0: 0, x1: 1, y1: 1 };
@@ -206,10 +221,14 @@ function decode(out, classes) {
     for (const [id, name, group] of classes) {
         const candidates = [];
         for (let i = 0; i < ANCHORS.length; i++) {
-            const o = i * 85, score = out[o + 4] * out[o + 5 + id];
+            const o = i * 85,
+                score = out[o + 4] * out[o + 5 + id];
             if (score <= THRESHOLD) continue;
             const [gx, gy, s] = ANCHORS[i];
-            const x = (out[o] + gx) * s, y = (out[o + 1] + gy) * s, w = Math.exp(out[o + 2]) * s, h = Math.exp(out[o + 3]) * s;
+            const x = (out[o] + gx) * s,
+                y = (out[o + 1] + gy) * s,
+                w = Math.exp(out[o + 2]) * s,
+                h = Math.exp(out[o + 3]) * s;
             candidates.push({ name, group, score, box: [x - w / 2, y - h / 2, x + w / 2, y + h / 2] });
         }
         found.push(...nms(candidates));
@@ -219,8 +238,10 @@ function decode(out, classes) {
 
 // one model input from a tile of a BGR frame: planar, 0..255, padded with YOLOX's 114
 function tensor(frame, W, H, tx, ty) {
-    const data = new Float32Array(3 * SIZE * SIZE).fill(114), plane = SIZE * SIZE;
-    const tw = Math.min(SIZE, W - tx), th = Math.min(SIZE, H - ty);
+    const data = new Float32Array(3 * SIZE * SIZE).fill(114),
+        plane = SIZE * SIZE;
+    const tw = Math.min(SIZE, W - tx),
+        th = Math.min(SIZE, H - ty);
     for (let y = 0; y < th; y++)
         for (let x = 0, src = ((ty + y) * W + tx) * 3, dst = y * SIZE; x < tw; x++, src += 3, dst++) {
             data[dst] = frame[src];
@@ -240,23 +261,68 @@ function tileStarts(len) {
 
 // size, and keyframe times in seconds from the start, from the packets (without decoding)
 async function probe(clip) {
-    const j = JSON.parse(await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height:format=start_time:packet=pts_time,flags', '-of', 'json', clip]));
+    const j = JSON.parse(
+        await run('ffprobe', [
+            '-v',
+            'error',
+            '-select_streams',
+            'v:0',
+            '-show_entries',
+            'stream=width,height:format=start_time:packet=pts_time,flags',
+            '-of',
+            'json',
+            clip,
+        ])
+    );
     const start = Number(j.format?.start_time) || 0;
-    const keys = (j.packets || []).filter((p) => p.flags?.startsWith('K')).map((p) => Number(p.pts_time) - start).sort((a, b) => a - b);
+    const keys = (j.packets || [])
+        .filter((p) => p.flags?.startsWith('K'))
+        .map((p) => Number(p.pts_time) - start)
+        .sort((a, b) => a - b);
     return { w: j.streams[0].width, h: j.streams[0].height, keys };
 }
 
 // the keyframes, cropped to the bounds and scaled to <tiles> tiles across, as raw BGR
 async function keyframes(clip, w, h, bounds, tiles) {
-    const cx = even(bounds.x0 * w), cy = even(bounds.y0 * h);
-    const cw = Math.min(even((bounds.x1 - bounds.x0) * w), w - cx), ch = Math.min(even((bounds.y1 - bounds.y0) * h), h - cy);
+    const cx = even(bounds.x0 * w),
+        cy = even(bounds.y0 * h);
+    const cw = Math.min(even((bounds.x1 - bounds.x0) * w), w - cx),
+        ch = Math.min(even((bounds.y1 - bounds.y0) * h), h - cy);
     // (side's mask makes this 684 high, so a second row of tiles: shrinking to one row halved the time but
     // took the dog in the trial clip from 0.73 to 0.52, and time is what this box has)
-    const W = tiles * STEP + OVERLAP, H = even((ch * W) / cw);
-    const raw = await run('ffmpeg', ['-v', 'error', '-skip_frame', 'nokey', '-i', clip, '-vsync', '0', '-vf', `crop=${cw}:${ch}:${cx}:${cy},scale=${W}:${H}:flags=area`,
-        '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'], true);
+    const W = tiles * STEP + OVERLAP,
+        H = even((ch * W) / cw);
+    const raw = await run(
+        'ffmpeg',
+        [
+            '-v',
+            'error',
+            '-skip_frame',
+            'nokey',
+            '-i',
+            clip,
+            '-vsync',
+            '0',
+            '-vf',
+            `crop=${cw}:${ch}:${cx}:${cy},scale=${W}:${H}:flags=area`,
+            '-f',
+            'rawvideo',
+            '-pix_fmt',
+            'bgr24',
+            '-',
+        ],
+        true
+    );
     const bytes = W * H * 3;
-    return { frames: Array.from({ length: Math.floor(raw.length / bytes) }, (_, i) => raw.subarray(i * bytes, (i + 1) * bytes)), W, H, cx, cy, sx: cw / W, sy: ch / H };
+    return {
+        frames: Array.from({ length: Math.floor(raw.length / bytes) }, (_, i) => raw.subarray(i * bytes, (i + 1) * bytes)),
+        W,
+        H,
+        cx,
+        cy,
+        sx: cw / W,
+        sy: ch / H,
+    };
 }
 
 async function detectClip(cam, clip) {
@@ -264,24 +330,46 @@ async function detectClip(cam, clip) {
     const classes = CLASSES.filter(([, , g]) => cam.groups.includes(g));
     const { w, h, keys } = await probe(clip);
     const kf = await keyframes(clip, w, h, masksBounds(masks, cam.groups), cam.tiles);
-    const xs = tileStarts(kf.W), ys = tileStarts(kf.H);
-    const frames = [];                              // per keyframe, detections in the clip's pixels
+    const xs = tileStarts(kf.W),
+        ys = tileStarts(kf.H);
+    const frames = []; // per keyframe, detections in the clip's pixels
     for (const frame of kf.frames) {
         const dets = [];
         for (const ty of ys)
             for (const tx of xs) {
                 const out = Object.values(await session.run({ images: tensor(frame, kf.W, kf.H, tx, ty) }))[0].data;
                 for (const d of decode(out, classes))
-                    dets.push({ ...d, box: [kf.cx + (d.box[0] + tx) * kf.sx, kf.cy + (d.box[1] + ty) * kf.sy, kf.cx + (d.box[2] + tx) * kf.sx, kf.cy + (d.box[3] + ty) * kf.sy] });
+                    dets.push({
+                        ...d,
+                        box: [
+                            kf.cx + (d.box[0] + tx) * kf.sx,
+                            kf.cy + (d.box[1] + ty) * kf.sy,
+                            kf.cx + (d.box[2] + tx) * kf.sx,
+                            kf.cy + (d.box[3] + ty) * kf.sy,
+                        ],
+                    });
             }
-        frames.push(nms(dets));                     // the same thing found in two overlapping tiles
+        frames.push(nms(dets)); // the same thing found in two overlapping tiles
     }
-    const detections = [], ignored = [], seen = {};
+    const detections = [],
+        ignored = [],
+        seen = {};
     frames.forEach((dets, k) => {
         for (const d of dets) {
-            const entry = { keyframe: k, t: keys[k] !== undefined ? round(keys[k], 1) : null, group: d.group, class: d.name, score: round(d.score, 2), box: d.box.map(Math.round) };
+            const entry = {
+                keyframe: k,
+                t: keys[k] !== undefined ? round(keys[k], 1) : null,
+                group: d.group,
+                class: d.name,
+                score: round(d.score, 2),
+                box: d.box.map(Math.round),
+            };
             if (!inZone(masks, d.group, d.box, w, h)) ignored.push({ ...entry, why: 'zone' });
-            else if (d.group === 'vehicles' && frames.length > 1 && frames.every((other) => other.some((o) => o.group === 'vehicles' && iou(o.box, d.box) >= 0.6)))
+            else if (
+                d.group === 'vehicles' &&
+                frames.length > 1 &&
+                frames.every((other) => other.some((o) => o.group === 'vehicles' && iou(o.box, d.box) >= 0.6))
+            )
                 ignored.push({ ...entry, why: 'static' });
             else {
                 detections.push(entry);
@@ -295,27 +383,58 @@ async function detectClip(cam, clip) {
 // the keyframe with the best detection, 640 wide, with that keyframe's detections boxed in their group's colour
 async function thumbnail(clip, w, h, detections, file) {
     const best = detections.reduce((a, b) => (b.score > a.score ? b : a));
-    const tw = 640, th = even((h * tw) / w), s = tw / w;
+    const tw = 640,
+        th = even((h * tw) / w),
+        s = tw / w;
     const boxes = detections
         .filter((d) => d.keyframe === best.keyframe)
-        .map((d) => `drawbox=x=${Math.round(d.box[0] * s)}:y=${Math.round(d.box[1] * s)}:w=${Math.max(2, Math.round((d.box[2] - d.box[0]) * s))}:h=${Math.max(2, Math.round((d.box[3] - d.box[1]) * s))}:color=${COLOURS[d.group]}:t=2`);
-    await run('ffmpeg', ['-v', 'error', '-y', '-skip_frame', 'nokey', '-i', clip, '-vsync', '0', '-vf', [`select=eq(n\\,${best.keyframe})`, `scale=${tw}:${th}`, ...boxes].join(','),
-        '-frames:v', '1', '-c:v', 'mjpeg', '-q:v', '4', '-update', '1', '-f', 'image2', `${file}.part`]);
+        .map(
+            (d) =>
+                `drawbox=x=${Math.round(d.box[0] * s)}:y=${Math.round(d.box[1] * s)}:w=${Math.max(2, Math.round((d.box[2] - d.box[0]) * s))}:h=${Math.max(2, Math.round((d.box[3] - d.box[1]) * s))}:color=${COLOURS[d.group]}:t=2`
+        );
+    await run('ffmpeg', [
+        '-v',
+        'error',
+        '-y',
+        '-skip_frame',
+        'nokey',
+        '-i',
+        clip,
+        '-vsync',
+        '0',
+        '-vf',
+        [`select=eq(n\\,${best.keyframe})`, `scale=${tw}:${th}`, ...boxes].join(','),
+        '-frames:v',
+        '1',
+        '-c:v',
+        'mjpeg',
+        '-q:v',
+        '4',
+        '-update',
+        '1',
+        '-f',
+        'image2',
+        `${file}.part`,
+    ]);
     fs.renameSync(`${file}.part`, file);
 }
 
-const failed = new Set();                           // clips that failed: left until a restart rather than retried every pass
+const failed = new Set(); // clips that failed: left until a restart rather than retried every pass
 
 async function doClip({ cam, clip }) {
-    const json = clip.replace(/\.mp4$/, '.json'), jpg = clip.replace(/\.mp4$/, '.jpg'), name = path.relative(path.join(ARCHIVE, cam.name), clip);
+    const json = clip.replace(/\.mp4$/, '.json'),
+        jpg = clip.replace(/\.mp4$/, '.jpg'),
+        name = path.relative(path.join(ARCHIVE, cam.name), clip);
     const t0 = Date.now();
     try {
         const { w, h, result } = await detectClip(cam, clip);
         if (result.detections.length) await thumbnail(clip, w, h, result.detections, jpg);
         else fs.rmSync(jpg, { force: true });
         writeAtomic(json, JSON.stringify({ ...result, processed: new Date().toISOString() }) + '\n');
-        const seen = Object.entries(result.seen).map(([g, s]) => `${g} ${s.toFixed(2)}`).join(', ');
-        if (seen) log(`${cam.name}: ${name}: ${seen} (${result.keyframes} keyframes, ${Math.round((Date.now() - t0) / 1000)}s)`);
+        const seen = Object.entries(result.seen)
+            .map(([g, s]) => `${g} ${s.toFixed(2)}`)
+            .join(', ');
+        log(`${cam.name}: ${name}: ${result.keyframes} keyframes, ${Math.round((Date.now() - t0) / 1000)}s${seen ? ' -- ' + seen : ''}`);
         return !!seen;
     } catch (e) {
         failed.add(clip);
@@ -338,7 +457,8 @@ async function scan() {
             continue;
         }
         for (const day of days) {
-            const names = await fs.promises.readdir(path.join(root, day)), have = new Set(names);
+            const names = await fs.promises.readdir(path.join(root, day)),
+                have = new Set(names);
             for (const n of names) {
                 if (/\.(json|jpg)\.part$/.test(n)) fs.rmSync(path.join(root, day, n), { force: true });
                 const m = RE_CLIP.exec(n);
@@ -359,13 +479,16 @@ async function scan() {
         for (const clip of TEST_CLIPS) {
             const camName = path.basename(path.dirname(path.dirname(path.resolve(clip))));
             const cam = CAMERAS.find((c) => c.name === camName) || { name: camName, groups: GROUPS, tiles: 1, masks: null, maskStamp: '' };
-            const t0 = Date.now(), { result } = await detectClip(cam, clip);
+            const t0 = Date.now(),
+                { result } = await detectClip(cam, clip);
             console.log(JSON.stringify({ clip, secs: Math.round((Date.now() - t0) / 1000), ...result }));
         }
         return;
     }
-    log(`annkedetect: ${CAMERAS.map((c) => `${c.name}=${c.groups.join('+')}${c.tiles > 1 ? `/tiles ${c.tiles}` : ''}`).join(' ')} in ${ARCHIVE}` +
-        `${DAYS ? `, last ${DAYS} days` : ''}, threshold ${THRESHOLD}, masks ${MASKS || 'none'}`);
+    log(
+        `annkedetect: ${CAMERAS.map((c) => `${c.name}=${c.groups.join('+')}${c.tiles > 1 ? `/tiles ${c.tiles}` : ''}`).join(' ')} in ${ARCHIVE}` +
+            `${DAYS ? `, last ${DAYS} days` : ''}, threshold ${THRESHOLD}, masks ${MASKS || 'none'}`
+    );
     for (;;) {
         let todo = [];
         try {
@@ -379,8 +502,10 @@ async function scan() {
         }
         log(`annkedetect: ${todo.length} clips to do, ${todo[0].stamp.slice(0, 8)} back to ${todo.at(-1).stamp.slice(0, 8)}`);
         // look again for new clips every RESCAN seconds, so they go ahead of the backlog
-        const until = Date.now() + RESCAN * 1000, t0 = Date.now();
-        let done = 0, flagged = 0;
+        const until = Date.now() + RESCAN * 1000,
+            t0 = Date.now();
+        let done = 0,
+            flagged = 0;
         for (const item of todo) {
             if (await doClip(item)) flagged++;
             done++;
