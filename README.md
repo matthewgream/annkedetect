@@ -29,7 +29,9 @@ clips done again -- after changing masks or settings -- remove their `.json`.
   motorcycle, bus, truck). At these distances the species is often wrong -- a white dog and a cat both
   scored as "sheep" -- while the group is right. A tractor comes out as a truck.
 - **Zones.** With `masks=<dir>`, a detection counts only where its bottom centre (feet, wheels) is white in
-  `<camera>-mask.png` (every group) or `<camera>-mask-<group>[-and-<group>].png` (`cars` is vehicles).
+  `<camera>-mask.png` (every group) or `<camera>-mask-<group>[-and-<group>].png` (`cars` is vehicles); a
+  group's own mask overrides the general one for that group, so `side-mask-vehicles.png` can paint out
+  fixed clutter that is only ever mistaken for a vehicle while people and animals keep `side-mask.png`.
   Only the part of the frame the masks cover is decoded and searched. Paint masks over a full-size
   snapshot of the camera; any size of the same shape works. They are re-read when they change.
 - **Not parked.** A vehicle in the same place in every keyframe is ignored (something parked, or a round
@@ -40,6 +42,31 @@ clips done again -- after changing masks or settings -- remove their `.json`.
   tile, a dog (0.18) and a cat in the yard were missed; at two they were found (0.47, 0.68).
 - `threshold` (default 0.4) is the score a detection needs. Lowering it on side brought the brick stacks
   and pallets in as "cars" well before it found the dog.
+- **Not a known false positive.** See below.
+
+## False positives
+
+Some things are taken for something else again and again, but not in every keyframe, so the "not parked"
+rule misses them: on side, the lid of the waste tank is a "car" (0.41-0.69) in one keyframe of a clip
+here and there, always in much the same box. To screen one out, copy a result that shows it into the
+`screens` folder:
+
+```sh
+cp /opt/storage/camera/side/20261006/recording_20261006131456.json /opt/annkedetect/annkedetect.workshop/screens/
+```
+
+Every detection in a file there becomes a known false positive for that result's camera (if the clip also
+caught something real, delete that entry from the copy). A detection counts as the same when it is of the
+same group on the same camera and in the same place: its box's centre inside the false positive's box, at
+no more than twice or half its size. (Not box overlap: on a small, distant box a shift of a few pixels
+halves it -- a turquoise thing at the back of side's view, 98x29 one day and 131x32 the next, overlapped by
+0.39.) A person by the lid is a different group, so still counts. A matched detection is listed in
+`ignored` with `"why": "screen"` and the file it matched.
+
+When the folder changes, every result already written is checked against it again -- from what the
+result recorded, without detecting again -- so dropping a file in clears the past too, and taking it out
+brings those detections back; thumbnails are redrawn or removed to match. Which screens the archive was
+last checked against is kept in `/var/lib/annkedetect`, so a restart does not check it all again.
 
 ## Cost
 

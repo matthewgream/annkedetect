@@ -26,6 +26,12 @@
 //   - small things need detail: tiles-<camera>=2 searches 640 px tiles of a frame scaled to two tiles wide
 //     (four times the pixels per object, about twice the time). At one tile the side camera's dog and cat
 //     were missed.
+//   - not a known false positive. Copy a clip's result file (recording_<...>.json) into <screens>/ and each
+//     detection in it becomes one: a detection of the same group on the same camera in the same place (its
+//     box's centre inside the false positive's box, at no more than twice or half its size) is ignored --
+//     side's tank lid, a "car" in one keyframe of a clip but never in all of them, which the rule above
+//     needs. Results already written are checked again whenever the folder changes, so a file dropped in
+//     (or taken out) also corrects the past.
 //
 // Config: /etc/default/annkedetect (key=value).
 // Usage: annkedetect [config]                    work through the archive, then keep watching it
@@ -69,6 +75,9 @@ const THRESHOLD = num('threshold', 0.4); // score a detection needs to count
 const DAYS = num('days', 0); // only clips from the last <n> days; 0: the whole archive
 const RESCAN = num('rescan', 3600); // seconds between looks for new clips (annkepull brings them once a day)
 const THREADS = num('threads', 2);
+const SCREENS = cfg['screens'] || ''; // directory of result files whose detections are false positives; empty: none
+// where the screens last applied to the archive are remembered, so a restart does not check it all again
+const SCREENS_APPLIED = process.env.STATE_DIRECTORY ? path.join(process.env.STATE_DIRECTORY, 'screens.applied') : '';
 
 for (const cam of CAMERAS)
     for (const g of cam.groups)
@@ -142,8 +151,13 @@ const MASK_WIDTH = 960; // plenty for looking up a point
 async function masksFor(cam) {
     if (!MASKS) return null;
     let names;
+    // the camera's general mask first, so a group's own mask (<camera>-mask-<group>.png) overrides it for that
+    // group: by name alone it would sort first, '-' before '.', and be overridden
+    const general = `${cam.name}-mask.png`;
     try {
-        names = (await fs.promises.readdir(MASKS)).filter((n) => n.startsWith(`${cam.name}-mask`) && n.endsWith('.png')).sort();
+        names = (await fs.promises.readdir(MASKS))
+            .filter((n) => n.startsWith(`${cam.name}-mask`) && n.endsWith('.png'))
+            .sort((a, b) => (b === general) - (a === general) || a.localeCompare(b));
     } catch {
         return null;
     }
@@ -364,7 +378,9 @@ async function detectClip(cam, clip) {
                 score: round(d.score, 2),
                 box: d.box.map(Math.round),
             };
+            const screen = screenFor(cam.name, d.group, entry.box);
             if (!inZone(masks, d.group, d.box, w, h)) ignored.push({ ...entry, why: 'zone' });
+            else if (screen) ignored.push({ ...entry, why: 'screen', screen: screen.file });
             else if (
                 d.group === 'vehicles' &&
                 frames.length > 1 &&
@@ -443,6 +459,144 @@ async function doClip({ cam, clip }) {
     }
 }
 
+// ------------------------------------------------------------------------------------------ screens
+
+// Known false positives: each detection in each result file in SCREENS, for that result's camera
+let screens = [],
+    screensStamp = null;
+
+// The same place: the box's centre inside the false positive's box, at no more than twice or half its size.
+// Not overlap (IoU): on a small box a few pixels' shift halves it -- side's turquoise thing at the back,
+// 98x29 one day and 131x32 the next, overlapped by 0.39.
+function samePlace(s, box) {
+    const cx = (box[0] + box[2]) / 2,
+        cy = (box[1] + box[3]) / 2,
+        ratio = area(box) / area(s);
+    return cx >= s[0] && cx <= s[2] && cy >= s[1] && cy <= s[3] && ratio <= 2 && ratio >= 0.5;
+}
+const screenFor = (camera, group, box) => screens.find((s) => s.camera === camera && s.group === group && samePlace(s.box, box));
+
+// re-read SCREENS when its files have changed (or at the first call); says whether they had
+async function loadScreens() {
+    if (!SCREENS) return false;
+    let names = [];
+    try {
+        names = (await fs.promises.readdir(SCREENS)).filter((n) => n.endsWith('.json')).sort();
+    } catch {
+        /* no folder: no screens */
+    }
+    const stamps = await Promise.all(
+        names.map((n) =>
+            fs.promises.stat(path.join(SCREENS, n)).then(
+                (s) => `${n}@${s.mtimeMs}`,
+                () => `${n}@gone`
+            )
+        )
+    );
+    const stamp = stamps.join(' ');
+    if (stamp === screensStamp) return false;
+    const list = [];
+    for (const n of names)
+        try {
+            const r = JSON.parse(await fs.promises.readFile(path.join(SCREENS, n), 'utf8'));
+            for (const d of r.detections || []) if (r.camera && d.group && d.box) list.push({ camera: r.camera, group: d.group, box: d.box, file: n });
+        } catch (e) {
+            log(`screens: ${n}: ${e.message}, ignored`);
+        }
+    screens = list;
+    screensStamp = stamp;
+    log(`screens: ${list.length} false positives from ${names.length} files in ${SCREENS}`);
+    return true;
+}
+
+const byKeyframe = (a, b) => a.keyframe - b.keyframe || b.score - a.score;
+const listKey = (list) => JSON.stringify(list.map((d) => [d.keyframe, d.group, d.box, d.why, d.screen]).sort());
+// what a thumbnail of these detections shows: the best one's keyframe, and that keyframe's boxes
+function thumbKey(dets) {
+    if (!dets.length) return '';
+    const best = dets.reduce((a, b) => (b.score > a.score ? b : a));
+    return listKey(dets.filter((d) => d.keyframe === best.keyframe));
+}
+
+// one result, checked against the screens as they are now, without detecting again; says whether it changed
+async function rescreenResult(cam, json) {
+    const clip = json.replace(/\.json$/, '.mp4'),
+        jpg = json.replace(/\.json$/, '.jpg'),
+        name = path.relative(path.join(ARCHIVE, cam.name), clip);
+    try {
+        const r = JSON.parse(await fs.promises.readFile(json, 'utf8'));
+        if (!Array.isArray(r.detections)) return false;
+        const candidates = [...r.detections, ...(r.ignored || []).filter((d) => d.why === 'screen').map(({ why, screen, ...d }) => d)];
+        const detections = [],
+            ignored = (r.ignored || []).filter((d) => d.why !== 'screen');
+        for (const d of candidates) {
+            const screen = screenFor(cam.name, d.group, d.box);
+            if (screen) ignored.push({ ...d, why: 'screen', screen: screen.file });
+            else detections.push(d);
+        }
+        if (listKey(detections) === listKey(r.detections) && listKey(ignored) === listKey(r.ignored || [])) return false;
+        detections.sort(byKeyframe);
+        const seen = {};
+        for (const d of detections) seen[d.group] = Math.max(seen[d.group] || 0, d.score);
+        if (!detections.length) fs.rmSync(jpg, { force: true });
+        else if (thumbKey(detections) !== thumbKey(r.detections) || !fs.existsSync(jpg)) {
+            const { w, h } = await probe(clip);
+            await thumbnail(clip, w, h, detections, jpg);
+        }
+        writeAtomic(json, JSON.stringify({ ...r, seen, detections, ignored, screened: new Date().toISOString() }) + '\n');
+        const now = Object.entries(seen)
+            .map(([g, s]) => `${g} ${s.toFixed(2)}`)
+            .join(', ');
+        log(`${cam.name}: ${name}: rescreened -- ${now || 'nothing seen'}`);
+        return true;
+    } catch (e) {
+        log(`${cam.name}: ${name}: rescreen FAILED: ${e.message}`);
+        return false;
+    }
+}
+
+// the screens, applied to every result already written (when they have changed since that was last done)
+async function rescreen() {
+    let applied = '';
+    try {
+        applied = SCREENS_APPLIED ? fs.readFileSync(SCREENS_APPLIED, 'utf8') : '';
+    } catch {
+        /* never applied */
+    }
+    if (applied === screensStamp) return;
+    const t0 = Date.now();
+    let checked = 0,
+        changed = 0;
+    for (const cam of CAMERAS) {
+        const root = path.join(ARCHIVE, cam.name);
+        let days = [];
+        try {
+            days = (await fs.promises.readdir(root)).filter((d) => RE_DAY.test(d));
+        } catch (e) {
+            log(`${cam.name}: ${e.message}`);
+            continue;
+        }
+        for (const day of days)
+            for (const n of await fs.promises.readdir(path.join(root, day))) {
+                if (!n.endsWith('.json') || !RE_CLIP.test(n.replace(/\.json$/, '.mp4'))) continue;
+                checked++;
+                if (await rescreenResult(cam, path.join(root, day, n))) changed++;
+            }
+    }
+    if (SCREENS_APPLIED) writeAtomic(SCREENS_APPLIED, screensStamp);
+    log(`screens: ${checked} results checked, ${changed} changed, in ${Math.round((Date.now() - t0) / 1000)}s`);
+}
+
+async function screensChanged() {
+    try {
+        if (await loadScreens()) await rescreen();
+    } catch (e) {
+        log(`screens: ${e.message}`);
+    }
+}
+
+// ------------------------------------------------------------------------------------------ scan
+
 // clips without a result, newest first; a leftover .part (an interrupted write) is removed on the way
 async function scan() {
     const since = DAYS ? dayOf(new Date(Date.now() - DAYS * 86400000)) : '';
@@ -476,6 +630,7 @@ async function scan() {
 (async () => {
     session = await ort.InferenceSession.create(MODEL, { intraOpNumThreads: THREADS, interOpNumThreads: 1, logSeverityLevel: 3 });
     if (TEST_CLIPS) {
+        await loadScreens();
         for (const clip of TEST_CLIPS) {
             const camName = path.basename(path.dirname(path.dirname(path.resolve(clip))));
             const cam = CAMERAS.find((c) => c.name === camName) || { name: camName, groups: GROUPS, tiles: 1, masks: null, maskStamp: '' };
@@ -487,9 +642,10 @@ async function scan() {
     }
     log(
         `annkedetect: ${CAMERAS.map((c) => `${c.name}=${c.groups.join('+')}${c.tiles > 1 ? `/tiles ${c.tiles}` : ''}`).join(' ')} in ${ARCHIVE}` +
-            `${DAYS ? `, last ${DAYS} days` : ''}, threshold ${THRESHOLD}, masks ${MASKS || 'none'}`
+            `${DAYS ? `, last ${DAYS} days` : ''}, threshold ${THRESHOLD}, masks ${MASKS || 'none'}, screens ${SCREENS || 'none'}`
     );
     for (;;) {
+        await screensChanged();
         let todo = [];
         try {
             todo = await scan();
@@ -507,6 +663,7 @@ async function scan() {
         let done = 0,
             flagged = 0;
         for (const item of todo) {
+            await screensChanged(); // a file dropped in takes effect before the next clip
             if (await doClip(item)) flagged++;
             done++;
             if (Date.now() > until) break;
